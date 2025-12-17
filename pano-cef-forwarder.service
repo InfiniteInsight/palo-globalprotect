@@ -1,0 +1,35 @@
+[Unit]
+Description=Panorama GlobalProtect to CEF Forwarder
+Documentation=https://docs.paloaltonetworks.com/
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=panocef
+Group=panocef
+ExecStart=/usr/bin/python3 /opt/pano-cef-forwarder/forwarder.py
+Restart=always
+RestartSec=2
+
+# Logging
+StandardOutput=append:/var/log/pano-cef-forwarder/stdout.log
+StandardError=append:/var/log/pano-cef-forwarder/stderr.log
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/pano-cef-forwarder
+ReadOnlyPaths=/etc/pano-cef-forwarder
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

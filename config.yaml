@@ -1,0 +1,21 @@
+# Palo Alto Networks Panorama GlobalProtect to CEF Forwarder Configuration
+
+input:
+  protocol: udp         # udp | tcp
+  listen_ip: "0.0.0.0"
+  listen_port: 5514
+
+output:
+  protocol: udp         # udp | tcp
+  target_ip: "10.10.10.10"   # SIEM/collector IP
+  target_port: 514
+
+cef:
+  default_severity: 3   # used only if mapping cannot be determined (0-10 scale)
+  vendor: "Palo Alto Networks"
+  product: "PAN-OS"
+
+performance:
+  workers: 1            # single process; tune if needed
+  queue_maxsize: 100000
+  batch_send: false     # keep false to preserve order
