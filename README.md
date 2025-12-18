@@ -6,6 +6,7 @@ Intelligent middleware that intercepts CEF-formatted Palo Alto GlobalProtect log
 
 Palo Alto Panorama can send GlobalProtect logs in CEF format, but:
 - **Severity is hardcoded** (usually to 3 - Informational)
+- **Severity field may be missing entirely** (some Panorama configurations)
 - **No dynamic classification** based on event content
 - **Poor SIEM alerting** due to lack of severity differentiation
 
@@ -13,12 +14,16 @@ Palo Alto Panorama can send GlobalProtect logs in CEF format, but:
 
 This interceptor sits between Panorama and your log collector (LogStash, Azure Monitor Agent, etc.) and:
 
-1. ✅ **Receives** CEF messages from Panorama
+1. ✅ **Receives** CEF messages from Panorama (with or without severity field)
 2. ✅ **Parses** CEF to extract event fields
 3. ✅ **Analyzes** event content (status, error codes, event types)
 4. ✅ **Applies** intelligent severity mapping
-5. ✅ **Modifies** CEF severity field
+5. ✅ **Inserts or overwrites** CEF severity field
 6. ✅ **Forwards** enhanced CEF to your SIEM collector
+
+**Handles both formats:**
+- CEF **with** severity: `CEF:0|Vendor|Product|Version|SigID|Name|3|Extensions` → Overwrites severity
+- CEF **without** severity: `CEF:0|Vendor|Product|Version|SigID|Name|Extensions` → Inserts severity
 
 ## Architecture
 
@@ -135,11 +140,18 @@ nc -u -l 5515
 
 # Terminal 3: Send test messages
 ./test-interceptor.sh 127.0.0.1 5514
+
+# Or test both formats (with and without severity field)
+./test-both-formats.sh 127.0.0.1 5514
 ```
 
 You should see:
 - Terminal 1: Parsing and severity modification logs
-- Terminal 2: Modified CEF messages with updated severity values
+- Terminal 2: Modified CEF messages with updated/inserted severity values
+
+**test-both-formats.sh** validates:
+- CEF messages WITH severity field (overwrite scenario)
+- CEF messages WITHOUT severity field (insert scenario)
 
 ## Command Line Options
 

@@ -25,7 +25,9 @@ def parse_cef(cef_message):
     """
     Parse CEF format message into header and extensions.
 
-    CEF Format: CEF:Version|Vendor|Product|DeviceVersion|SignatureID|Name|Severity|Extensions
+    Handles both formats:
+    - With severity:    CEF:Version|Vendor|Product|DeviceVersion|SignatureID|Name|Severity|Extensions
+    - Without severity: CEF:Version|Vendor|Product|DeviceVersion|SignatureID|Name|Extensions
 
     Returns:
         dict: {
@@ -35,14 +37,14 @@ def parse_cef(cef_message):
             'device_version': str,
             'signature_id': str,
             'name': str,
-            'severity': str,
-            'extensions': dict
+            'severity': str or None,
+            'extensions': dict,
+            'has_severity': bool
         }
     """
     cef_message = cef_message.strip()
 
-    # CEF header pattern: CEF:Version|...|...|...|...|...|Severity|Extensions
-    # Need to handle pipes in header carefully (only first 7 pipes are header delimiters)
+    # CEF header pattern: CEF:Version|...|...|...|...|...|[Severity]|Extensions
     if not cef_message.startswith('CEF:'):
         logger.warning(f"Invalid CEF format (no CEF: prefix): {cef_message[:100]}")
         return None
@@ -50,25 +52,47 @@ def parse_cef(cef_message):
     # Split on first 7 pipes to separate header from extensions
     parts = cef_message.split('|', 7)
 
-    if len(parts) < 8:
-        logger.warning(f"Invalid CEF format (insufficient fields): {cef_message[:100]}")
+    # CEF can have 7 parts (no severity) or 8 parts (with severity)
+    if len(parts) < 7:
+        logger.warning(f"Invalid CEF format (insufficient fields, need at least 7): {cef_message[:100]}")
         return None
 
-    header = {
-        'version': parts[0].replace('CEF:', ''),
-        'vendor': parts[1],
-        'product': parts[2],
-        'device_version': parts[3],
-        'signature_id': parts[4],
-        'name': parts[5],
-        'severity': parts[6],
-        'extensions_raw': parts[7]
-    }
+    # Determine if severity field is present
+    # If we have 8 parts, severity is at index 6
+    # If we have 7 parts, severity is missing and extensions start at index 6
+    has_severity = len(parts) == 8
+
+    if has_severity:
+        header = {
+            'version': parts[0].replace('CEF:', ''),
+            'vendor': parts[1],
+            'product': parts[2],
+            'device_version': parts[3],
+            'signature_id': parts[4],
+            'name': parts[5],
+            'severity': parts[6],
+            'extensions_raw': parts[7],
+            'has_severity': True
+        }
+        ext_string = parts[7].strip()
+    else:
+        # No severity field - extensions are at index 6
+        header = {
+            'version': parts[0].replace('CEF:', ''),
+            'vendor': parts[1],
+            'product': parts[2],
+            'device_version': parts[3],
+            'signature_id': parts[4],
+            'name': parts[5],
+            'severity': None,
+            'extensions_raw': parts[6],
+            'has_severity': False
+        }
+        ext_string = parts[6].strip()
 
     # Parse extensions (key=value pairs, space-separated)
     # CEF extensions can have escaped = signs (\=) which should not be treated as delimiters
     extensions = {}
-    ext_string = parts[7].strip()
 
     # Simple regex to match key=value pairs, handling escaped equals
     # Pattern: key=value where value can contain \= but not unescaped =
@@ -139,7 +163,11 @@ def derive_severity(cef_data):
 
 def modify_cef_severity(cef_message, new_severity):
     """
-    Modify the severity field in a CEF message.
+    Modify or insert the severity field in a CEF message.
+
+    Handles both scenarios:
+    - If severity field exists: Overwrites it
+    - If severity field is missing: Inserts it in the correct position
 
     Args:
         cef_message: Original CEF message string
@@ -150,14 +178,21 @@ def modify_cef_severity(cef_message, new_severity):
     """
     parts = cef_message.split('|', 7)
 
-    if len(parts) < 8:
-        logger.error("Cannot modify CEF severity: invalid format")
+    if len(parts) < 7:
+        logger.error("Cannot modify CEF severity: invalid format (need at least 7 fields)")
         return cef_message
 
-    # Replace severity (index 6)
-    parts[6] = str(new_severity)
-
-    return '|'.join(parts)
+    if len(parts) == 8:
+        # Has severity field - overwrite it (index 6)
+        parts[6] = str(new_severity)
+        return '|'.join(parts)
+    else:
+        # Missing severity field - insert it at index 6
+        # Current: CEF:0|Vendor|Product|Version|SigID|Name|Extensions
+        # Target:  CEF:0|Vendor|Product|Version|SigID|Name|Severity|Extensions
+        # parts[0-5] are header, parts[6] is extensions
+        parts_with_severity = parts[:6] + [str(new_severity)] + [parts[6]]
+        return '|'.join(parts_with_severity)
 
 
 def run_interceptor(listen_ip, listen_port, forward_ip, forward_port,
