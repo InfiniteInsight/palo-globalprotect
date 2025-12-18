@@ -25,6 +25,9 @@ This interceptor sits between Panorama and your log collector (LogStash, Azure M
 - CEF **with** severity: `CEF:0|Vendor|Product|Version|SigID|Name|3|Extensions` → Overwrites severity
 - CEF **without** severity: `CEF:0|Vendor|Product|Version|SigID|Name|Extensions` → Inserts severity
 
+**Fallback Protection:**
+If CEF parsing fails but the message appears to be CEF format, the interceptor will insert a **default severity of 5 (Medium)** to ensure Sentinel can still parse the logs. This prevents data loss from unparseable messages.
+
 ## Architecture
 
 ```
@@ -153,6 +156,11 @@ You should see:
 - CEF messages WITH severity field (overwrite scenario)
 - CEF messages WITHOUT severity field (insert scenario)
 
+**test-fallback.sh** validates:
+- Fallback behavior when parsing fails
+- Edge cases and malformed CEF messages
+- Non-CEF message pass-through
+
 ## Command Line Options
 
 ```
@@ -226,6 +234,24 @@ The interceptor logs statistics every 1,000 messages:
 ```
 Processed 1000 messages, modified 432 severities, 0 errors
 ```
+
+## Resilience & Data Protection
+
+The interceptor is designed to **never discard non-empty traffic**:
+
+| Scenario | Action | Result |
+|----------|--------|--------|
+| ✅ Valid CEF format | Parse → Analyze → Modify | Intelligent severity applied |
+| ✅ CEF missing severity | Parse → Insert severity | Intelligent severity inserted |
+| ⚠️ CEF parsing fails | Fallback → Insert severity=5 | Default severity inserted |
+| ✅ Non-CEF message | Pass through | Forwarded unmodified |
+| ❌ Empty message | Skip | Not forwarded (only scenario) |
+
+**Key Benefits:**
+- **No data loss:** All non-empty messages are forwarded
+- **Sentinel compatibility:** Even unparseable CEF gets severity=5
+- **Graceful degradation:** Unknown formats pass through unchanged
+- **Production safe:** Can be deployed without risk of breaking existing flows
 
 ## Troubleshooting
 

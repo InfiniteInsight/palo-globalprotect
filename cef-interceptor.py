@@ -195,6 +195,50 @@ def modify_cef_severity(cef_message, new_severity):
         return '|'.join(parts_with_severity)
 
 
+def fallback_insert_severity(cef_message, default_severity=5):
+    """
+    Best-effort attempt to insert default severity into CEF-like messages.
+
+    Used when full parsing fails but the message appears to be CEF format.
+    This ensures Sentinel can still parse the logs even if our parser fails.
+
+    Args:
+        cef_message: Original message string
+        default_severity: Severity to insert (default: 5 - Medium)
+
+    Returns:
+        str: Message with severity inserted if possible, otherwise original
+    """
+    cef_message = cef_message.strip()
+
+    # Only attempt if message looks like CEF
+    if not cef_message.startswith('CEF:'):
+        return cef_message
+
+    # Try simple pipe-based insertion
+    parts = cef_message.split('|', 7)
+
+    # If we have exactly 7 parts (6 pipes), likely missing severity
+    if len(parts) == 7:
+        # Insert severity at position 6
+        parts_with_severity = parts[:6] + [str(default_severity)] + [parts[6]]
+        result = '|'.join(parts_with_severity)
+        logger.info(f"Fallback: Inserted severity={default_severity} into unparseable CEF message")
+        return result
+
+    # If we have 8 parts but parsing failed, might have malformed severity
+    # Replace whatever is at position 6 with default
+    if len(parts) == 8:
+        parts[6] = str(default_severity)
+        result = '|'.join(parts)
+        logger.info(f"Fallback: Replaced potentially malformed severity with {default_severity}")
+        return result
+
+    # Can't safely modify - return original
+    logger.warning(f"Fallback: Cannot insert severity, forwarding original (parts={len(parts)})")
+    return cef_message
+
+
 def run_interceptor(listen_ip, listen_port, forward_ip, forward_port,
                    input_protocol='udp', output_protocol='udp'):
     """
@@ -269,11 +313,12 @@ def run_interceptor(listen_ip, listen_port, forward_ip, forward_port,
                             logger.info(f"Processed {msg_count} messages, modified {modified_count} severities, {error_count} errors")
                     else:
                         error_count += 1
-                        # Forward unmodified if parsing failed
+                        # Parsing failed - try fallback severity insertion
+                        fallback_cef = fallback_insert_severity(cef_message, default_severity=5)
                         if output_protocol.lower() == 'udp':
-                            out_sock.sendto(data, (forward_ip, forward_port))
+                            out_sock.sendto(fallback_cef.encode('utf-8'), (forward_ip, forward_port))
                         else:
-                            out_sock.sendall(data + b'\n')
+                            out_sock.sendall((fallback_cef + '\n').encode('utf-8'))
 
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
@@ -326,11 +371,12 @@ def run_interceptor(listen_ip, listen_port, forward_ip, forward_port,
                                         modified_count += 1
                                 else:
                                     error_count += 1
-                                    # Forward unmodified if parsing failed
+                                    # Parsing failed - try fallback severity insertion
+                                    fallback_cef = fallback_insert_severity(cef_message, default_severity=5)
                                     if output_protocol.lower() == 'udp':
-                                        out_sock.sendto(line, (forward_ip, forward_port))
+                                        out_sock.sendto(fallback_cef.encode('utf-8'), (forward_ip, forward_port))
                                     else:
-                                        out_sock.sendall(line + b'\n')
+                                        out_sock.sendall((fallback_cef + '\n').encode('utf-8'))
 
                     logger.info(f"Connection closed from {client_addr}, processed {msg_count} messages")
 
