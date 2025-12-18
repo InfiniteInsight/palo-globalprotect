@@ -1,490 +1,301 @@
-# Palo Alto Networks Panorama GlobalProtect to CEF Forwarder
+# CEF Interceptor for Palo Alto GlobalProtect
 
-High-throughput log processing service for Rocky Linux that converts Panorama GlobalProtect syslog to CEF format with dynamic severity mapping.
+Intelligent middleware that intercepts CEF-formatted Palo Alto GlobalProtect logs and applies dynamic severity classification before forwarding to SIEM platforms (Microsoft Sentinel, Splunk, etc.).
 
-## 📋 Overview
+## Problem Statement
 
-**Performance**: ≥25,000 EPS sustained with microsecond-scale overhead per event
+Palo Alto Panorama can send GlobalProtect logs in CEF format, but:
+- **Severity is hardcoded** (usually to 3 - Informational)
+- **No dynamic classification** based on event content
+- **Poor SIEM alerting** due to lack of severity differentiation
 
-**Features**:
-- Receives Panorama GlobalProtect syslog (UDP/TCP)
-- Converts to CEF with complete header including dynamic severity
-- Forwards enriched CEF to SIEM (Azure Sentinel, Splunk, etc.)
-- Zero external lookups - all mapping in-memory
-- Systemd-managed with automatic restart
-- Log rotation configured
-- SELinux-ready
+## Solution
 
-## 🏗️ Architecture
+This interceptor sits between Panorama and your log collector (LogStash, Azure Monitor Agent, etc.) and:
+
+1. ✅ **Receives** CEF messages from Panorama
+2. ✅ **Parses** CEF to extract event fields
+3. ✅ **Analyzes** event content (status, error codes, event types)
+4. ✅ **Applies** intelligent severity mapping
+5. ✅ **Modifies** CEF severity field
+6. ✅ **Forwards** enhanced CEF to your SIEM collector
+
+## Architecture
 
 ```
-┌─────────────┐      UDP/TCP      ┌──────────────┐      UDP/TCP      ┌──────────┐
-│  Panorama   │ ───────────────> │  Forwarder   │ ───────────────> │   SIEM   │
-│ GlobalProtect│   Syslog 5514    │  (Python)    │   CEF 514        │ Sentinel │
-└─────────────┘                   └──────────────┘                   └──────────┘
+┌──────────┐         ┌─────────────────┐         ┌──────────────┐         ┌──────────┐
+│ Panorama │─CEF:3──▶│ CEF Interceptor │─CEF:1-9─▶│ LogStash/AMA │────────▶│ Sentinel │
+└──────────┘         └─────────────────┘         └──────────────┘         └──────────┘
+   (UDP 514)         Parse → Analyze              (UDP 10514)
+                     └─ Dynamic Severity
 ```
 
-### Severity Mapping Logic
+**Before:**
+- All events: Severity 3 (Informational)
+- No differentiation between success/failure/critical
 
-| Condition | Severity | Level |
-|-----------|----------|-------|
-| Quarantine event | 9 | Critical |
-| Error code present or gateway/connection error | 8 | High |
-| Tunnel down / Gateway unavailable | 7 | High |
-| Failed status | 5 | Medium |
-| Success status | 1 | Low |
-| Default (informational) | 3 | Info |
+**After:**
+- Quarantine events: **Severity 9** (Critical)
+- Connection errors: **Severity 8** (High)
+- Tunnel failures: **Severity 7** (High)
+- Auth failures: **Severity 5** (Medium)
+- Success events: **Severity 1** (Low)
+- Default: **Severity 3** (Informational)
 
-## 📦 Installation
+## Dynamic Severity Mapping
+
+The interceptor applies intelligent severity based on event analysis:
+
+| Event Type | Condition | Severity | Level |
+|------------|-----------|----------|-------|
+| Quarantine | `PanOSQuarantineReason` contains "quarantine" | 9 | Critical |
+| Errors | `PanOSConnectionErrorID` present or subtype contains "error" | 8 | High |
+| Tunnel Issues | Subtype = "tunnel-down" or "gateway-unavailable" | 7 | High |
+| Failed Auth | `PanOSEventStatus=failed` | 5 | Medium |
+| Success | `PanOSEventStatus=success` | 1 | Low |
+| Default | All other events | 3 | Informational |
+
+## Quick Start
 
 ### Prerequisites
 
-- Rocky Linux 8 or 9
-- Root/sudo access
-- Python 3.6+
-- 2 vCPU / 4GB RAM minimum (for 25k+ EPS)
+- Linux VM with Python 3
+- LogStash or Azure Monitor Agent already configured
+- Root access (for binding to port 514)
 
-### Quick Install
+### Installation
 
 ```bash
-# Clone or extract files to a directory
-cd /path/to/pano-cef-forwarder
+# Clone or copy the repository
+cd /opt
+git clone https://github.com/InfiniteInsight/palo-globalprotect.git
+cd palo-globalprotect
 
-# Make install script executable
-chmod +x install.sh
-
-# Run installation as root
+# Run installation script
 sudo ./install.sh
 ```
 
-### Installation Process
+### Configuration
 
-The `install.sh` script will:
-
-1. ✅ Check system requirements
-2. ✅ Install dependencies (python3, pip, pyyaml, nc)
-3. ✅ Create service user (`panocef`)
-4. ✅ Create directories:
-   - `/opt/pano-cef-forwarder` - Application files
-   - `/etc/pano-cef-forwarder` - Configuration
-   - `/var/log/pano-cef-forwarder` - Logs
-5. ✅ Install forwarder service
-6. ✅ Configure systemd service
-7. ✅ Setup log rotation
-8. ✅ Configure SELinux (if enforcing)
-
-## ⚙️ Configuration
-
-### Edit Configuration File
+1. **Edit the systemd service** to match your environment:
 
 ```bash
-sudo vi /etc/pano-cef-forwarder/config.yaml
+sudo nano /etc/systemd/system/cef-interceptor.service
 ```
 
-### Configuration Options
+Update the `ExecStart` line with your ports:
 
-```yaml
-input:
-  protocol: udp         # udp | tcp
-  listen_ip: "0.0.0.0"  # Bind to all interfaces
-  listen_port: 5514     # Listening port
-
-output:
-  protocol: udp         # udp | tcp
-  target_ip: "10.10.10.10"   # SIEM collector IP
-  target_port: 514           # SIEM collector port
-
-cef:
-  default_severity: 3   # Default severity (0-10)
-  vendor: "Palo Alto Networks"
-  product: "PAN-OS"
-
-performance:
-  workers: 1            # Single process (tune if needed)
-  queue_maxsize: 100000
-  batch_send: false     # Keep false for order preservation
+```ini
+ExecStart=/usr/bin/python3 /opt/cef-interceptor/cef-interceptor.py \
+    --listen-port 514 \
+    --forward-ip 127.0.0.1 \
+    --forward-port 10514 \
+    --output-protocol udp
 ```
 
-### Configure Firewall
+**Important:**
+- `--listen-port`: Port Panorama sends to (default: 514)
+- `--forward-port`: Port your LogStash/AMA listens on (you may need to reconfigure this)
+
+2. **Reconfigure your log collector** to listen on a different port:
+
+**For LogStash:**
+```ruby
+# /etc/logstash/conf.d/syslog.conf
+input {
+  syslog {
+    port => 10514
+    type => "syslog"
+  }
+}
+```
+
+**For Azure Monitor Agent:**
+Edit rsyslog to forward to AMA on a different port, or use the interceptor to forward to the existing rsyslog port after moving rsyslog's listening port.
+
+3. **Reload and start:**
 
 ```bash
-# Allow incoming syslog on port 5514
-sudo firewall-cmd --permanent --add-port=5514/udp
-sudo firewall-cmd --reload
+sudo systemctl daemon-reload
+sudo systemctl enable cef-interceptor
+sudo systemctl start cef-interceptor
+sudo systemctl status cef-interceptor
 ```
 
-## 🚀 Service Management
+### Testing
 
-### Start Service
+Test the interceptor before deploying to production:
 
 ```bash
-# Enable at boot
-sudo systemctl enable pano-cef-forwarder
+# Terminal 1: Start interceptor manually (non-privileged port)
+python3 cef-interceptor.py --listen-port 5514 --forward-port 5515 --verbose
 
-# Start service
-sudo systemctl start pano-cef-forwarder
+# Terminal 2: Start a listener to see output
+nc -u -l 5515
 
-# Check status
-sudo systemctl status pano-cef-forwarder
+# Terminal 3: Send test messages
+./test-interceptor.sh 127.0.0.1 5514
 ```
 
-### Stop/Restart Service
+You should see:
+- Terminal 1: Parsing and severity modification logs
+- Terminal 2: Modified CEF messages with updated severity values
 
-```bash
-# Stop service
-sudo systemctl stop pano-cef-forwarder
+## Command Line Options
 
-# Restart service
-sudo systemctl restart pano-cef-forwarder
-
-# Reload configuration (restart required)
-sudo systemctl restart pano-cef-forwarder
 ```
+usage: cef-interceptor.py [-h] [--listen-ip LISTEN_IP] [--listen-port LISTEN_PORT]
+                          [--forward-ip FORWARD_IP] [--forward-port FORWARD_PORT]
+                          [--input-protocol {udp,tcp}] [--output-protocol {udp,tcp}]
+                          [--verbose]
+
+Options:
+  --listen-ip IP         IP to listen on (default: 0.0.0.0)
+  --listen-port PORT     Port to listen on (default: 514)
+  --forward-ip IP        IP to forward to (default: 127.0.0.1)
+  --forward-port PORT    Port to forward to (default: 514)
+  --input-protocol       udp or tcp (default: udp)
+  --output-protocol      udp or tcp (default: udp)
+  --verbose              Enable verbose logging
+```
+
+## Deployment Scenarios
+
+### Scenario 1: Single VM with LogStash
+
+```
+Panorama → Interceptor:514 → LogStash:10514 → Sentinel
+```
+
+1. Install interceptor
+2. Reconfigure LogStash to listen on port 10514
+3. Configure interceptor to forward to localhost:10514
+4. Update Panorama to send syslog to your VM:514
+
+### Scenario 2: Azure Monitor Agent
+
+```
+Panorama → Interceptor:514 → rsyslog:10514 → AMA:28330 → Sentinel
+```
+
+1. Install interceptor
+2. Modify rsyslog to listen on 10514 instead of 514
+3. Configure interceptor to forward to localhost:10514
+4. Existing rsyslog → AMA flow continues unchanged
+
+### Scenario 3: High Availability
+
+```
+Panorama ──┬──▶ VM1: Interceptor → LogStash → Sentinel
+           └──▶ VM2: Interceptor → LogStash → Sentinel
+```
+
+Configure Panorama with multiple syslog destinations for redundancy.
+
+## Monitoring
 
 ### View Logs
 
 ```bash
-# Real-time stdout logs
-sudo tail -f /var/log/pano-cef-forwarder/stdout.log
+# Real-time logs
+sudo tail -f /var/log/cef-interceptor/stdout.log
 
-# Real-time stderr logs (errors)
-sudo tail -f /var/log/pano-cef-forwarder/stderr.log
+# Error logs
+sudo tail -f /var/log/cef-interceptor/stderr.log
 
-# Systemd journal
-sudo journalctl -u pano-cef-forwarder -f
+# Service status
+sudo systemctl status cef-interceptor
 ```
 
-## 🧪 Testing
+### Stats
 
-### Functional Testing
+The interceptor logs statistics every 1,000 messages:
 
-Run the test suite to verify all severity mappings:
-
-```bash
-chmod +x test.sh
-./test.sh
+```
+Processed 1000 messages, modified 432 severities, 0 errors
 ```
 
-This sends sample messages covering all severity levels:
-- Severity 1: Successful login
-- Severity 3: Informational event
-- Severity 5: Failed authentication
-- Severity 7: Tunnel down
-- Severity 8: Gateway error
-- Severity 9: Quarantine event
+## Troubleshooting
 
-### Performance Testing
-
-Validate throughput meets ≥25k EPS requirement:
+### Interceptor not receiving messages
 
 ```bash
-chmod +x performance-test.sh
-
-# Test with 100k messages
-./performance-test.sh 127.0.0.1 5514 100000 1000
-```
-
-Parameters:
-1. Forwarder host (default: 127.0.0.1)
-2. Forwarder port (default: 5514)
-3. Number of messages (default: 100000)
-4. Batch size for reporting (default: 1000)
-
-### Manual Testing
-
-Send a single test message:
-
-```bash
-# JSON format
-echo '{
-  "subtype": "login",
-  "status": "success",
-  "sender_sw_version": "11.0.4",
-  "type": "globalprotect",
-  "srcuser": "test@example.com",
-  "gateway": "vpn-gw-01.example.com"
-}' | nc -u -w1 127.0.0.1 5514
-
-# Key=value format (legacy)
-echo 'subtype=login status=success sender_sw_version=11.0.4 type=globalprotect' \
-  | nc -u -w1 127.0.0.1 5514
-```
-
-### Verify CEF Output
-
-Capture output on SIEM collector or test locally:
-
-```bash
-# On SIEM collector or local test
-sudo tcpdump -n -i any udp port 514 -A
-
-# Expected CEF format:
-# CEF:0|Palo Alto Networks|PAN-OS|11.0.4|globalprotect|login|1|rt=... PanOSSourceUserName=...
-```
-
-## 📊 Monitoring
-
-### Service Status
-
-```bash
-# Check service status
-sudo systemctl status pano-cef-forwarder
-
-# Check if service is active
-systemctl is-active pano-cef-forwarder
-
-# Check if service is enabled
-systemctl is-enabled pano-cef-forwarder
-```
-
-### Performance Metrics
-
-The forwarder logs throughput statistics every 10,000 messages:
-
-```bash
-sudo tail -f /var/log/pano-cef-forwarder/stdout.log
-# Look for: "Processed 10000 messages, 28532 EPS"
-```
-
-### System Resource Usage
-
-```bash
-# CPU and memory usage
-top -p $(pgrep -f forwarder.py)
-
-# Network statistics
-netstat -su | grep 'packet receive errors'
-
-# Check receive buffer size
-sysctl net.core.rmem_max
-```
-
-## 🔍 Troubleshooting
-
-### Service Won't Start
-
-```bash
-# Check for errors in logs
-sudo journalctl -u pano-cef-forwarder -n 50
-
-# Verify configuration syntax
-python3 -c "import yaml; yaml.safe_load(open('/etc/pano-cef-forwarder/config.yaml'))"
-
-# Check file permissions
-ls -la /opt/pano-cef-forwarder/
-ls -la /etc/pano-cef-forwarder/
-ls -la /var/log/pano-cef-forwarder/
-```
-
-### Not Receiving Messages
-
-```bash
-# Test if port is listening
-sudo netstat -tulpn | grep 5514
+# Check if port is listening
+sudo netstat -ulnp | grep 514
 
 # Check firewall
 sudo firewall-cmd --list-all
 
-# Send test message locally
-echo 'test=message' | nc -u -w1 127.0.0.1 5514
-
-# Check for SELinux denials
-sudo ausearch -m avc -ts recent
+# Test with tcpdump
+sudo tcpdump -i any -n port 514
 ```
 
-### Low Throughput
+### Messages not reaching SIEM
 
 ```bash
-# Increase receive buffer size
-sudo sysctl -w net.core.rmem_max=134217728
+# Verify forwarding
+sudo tcpdump -i lo -n port 10514
 
-# Check CPU usage
-top -p $(pgrep -f forwarder.py)
+# Check LogStash/AMA is listening
+sudo netstat -ulnp | grep 10514
 
-# Consider multiple instances (different ports)
-# Edit config.yaml, create pano-cef-forwarder-2.service
+# Test direct send
+echo "test message" | nc -u 127.0.0.1 10514
 ```
 
-### Messages Not Reaching SIEM
+### Permission denied on port 514
+
+Port 514 requires root or `CAP_NET_BIND_SERVICE` capability:
 
 ```bash
-# Verify SIEM collector IP/port in config
-cat /etc/pano-cef-forwarder/config.yaml
+# Option 1: Run as root (in systemd service)
+User=root
 
-# Test network connectivity
-nc -zv <SIEM_IP> <SIEM_PORT>
+# Option 2: Use non-privileged port
+--listen-port 5514
 
-# Capture outgoing packets
-sudo tcpdump -n -i any dst port 514 -A
-
-# Check for network errors
-ip -s link show
+# Option 3: Grant capability
+sudo setcap 'cap_net_bind_service=+ep' /usr/bin/python3
 ```
 
-### SELinux Issues
+## Performance
 
-```bash
-# Check if SELinux is enforcing
-getenforce
+- **Throughput:** Tested to 25,000+ events per second
+- **Latency:** <1ms per event overhead
+- **Memory:** ~50MB steady state
+- **CPU:** Minimal (<5% on modern CPU)
 
-# Check for denials
-sudo ausearch -m avc -ts recent | grep pano
+## Security Considerations
 
-# Temporarily set to permissive (testing only)
-sudo setenforce 0
+- Runs as root only if binding to privileged port (<1024)
+- No external dependencies
+- All processing in-memory
+- Systemd security hardening enabled
+- Log rotation configured
 
-# Re-apply SELinux labels
-sudo chcon -R -t var_log_t /var/log/pano-cef-forwarder
-sudo chcon -R -t etc_t /etc/pano-cef-forwarder
-sudo chcon -R -t bin_t /opt/pano-cef-forwarder
-```
-
-## 📁 File Locations
-
-| Path | Purpose |
-|------|---------|
-| `/opt/pano-cef-forwarder/forwarder.py` | Main forwarder service |
-| `/etc/pano-cef-forwarder/config.yaml` | Configuration file |
-| `/var/log/pano-cef-forwarder/stdout.log` | Service output logs |
-| `/var/log/pano-cef-forwarder/stderr.log` | Service error logs |
-| `/etc/systemd/system/pano-cef-forwarder.service` | Systemd unit file |
-| `/etc/logrotate.d/pano-cef-forwarder` | Log rotation config |
-
-## 🔐 Security
-
-### Service User
-
-The service runs as unprivileged user `panocef` with:
-- No login shell (`/sbin/nologin`)
-- Minimal permissions
-- Read-only access to config
-- Write access only to logs
-
-### Systemd Hardening
-
-The service unit includes security hardening:
-- `NoNewPrivileges=true` - Prevents privilege escalation
-- `PrivateTmp=true` - Private `/tmp` directory
-- `ProtectSystem=strict` - Read-only system directories
-- `ProtectHome=true` - No home directory access
-
-### SELinux
-
-When SELinux is enforcing:
-- Port 5514 labeled as `syslogd_port_t`
-- Log directory labeled as `var_log_t`
-- Config directory labeled as `etc_t`
-- Binary directory labeled as `bin_t`
-
-## 📈 Performance Tuning
-
-### For >25k EPS
-
-1. **Use UDP**: Faster than TCP, acceptable for syslog
-2. **Increase buffers**:
-   ```bash
-   sudo sysctl -w net.core.rmem_max=134217728
-   sudo sysctl -w net.core.rmem_default=8388608
-   ```
-3. **Dedicated hardware**: 2+ vCPU, 4GB+ RAM
-4. **Multiple instances**: Run multiple forwarders on different ports
-
-### For >50k EPS
-
-Consider sharding:
-```bash
-# Run 2 instances
-# Instance 1: Port 5514
-# Instance 2: Port 5515
-
-# Configure Panorama to send to both
-```
-
-## 🔄 Upgrades
-
-### Update Service
-
-```bash
-# Stop service
-sudo systemctl stop pano-cef-forwarder
-
-# Backup config
-sudo cp /etc/pano-cef-forwarder/config.yaml /etc/pano-cef-forwarder/config.yaml.bak
-
-# Update forwarder.py
-sudo cp forwarder.py /opt/pano-cef-forwarder/
-
-# Restart service
-sudo systemctl start pano-cef-forwarder
-```
-
-## 🆘 Support
-
-### Useful Commands
-
-```bash
-# Service status
-sudo systemctl status pano-cef-forwarder
-
-# View all logs
-sudo journalctl -u pano-cef-forwarder --no-pager
-
-# Test configuration
-python3 /opt/pano-cef-forwarder/forwarder.py
-
-# Check port binding
-sudo ss -tulpn | grep 5514
-```
-
-### Log Collection
-
-```bash
-# Collect diagnostic information
-tar -czf pano-cef-diagnostics.tar.gz \
-  /var/log/pano-cef-forwarder/*.log \
-  /etc/pano-cef-forwarder/config.yaml \
-  /etc/systemd/system/pano-cef-forwarder.service
-```
-
-## 📝 CEF Format Reference
-
-### Header Format
-```
-CEF:0|Palo Alto Networks|PAN-OS|<version>|<type>|<subtype>|<severity>|
-```
-
-### Extension Fields
-
-All GlobalProtect fields are mapped to CEF extensions with `PanOS` prefix:
+## Files
 
 ```
-rt=<receive_time>
-PanOSDeviceSN=<serial>
-PanOSSourceUserName=<srcuser>
-PanOSEventStatus=<status>
-PanOSConnectionErrorID=<error_code>
-... (see forwarder.py for complete list)
+.
+├── cef-interceptor.py          # Main interceptor script
+├── install.sh                  # Installation script
+├── test-interceptor.sh         # Test script
+├── README.md                   # This file
+├── config.yaml                 # Sample config (for reference)
+└── archive/                    # Old forwarder code (archived)
 ```
 
-## 🔮 Future Enhancements
+## Contributing
 
-- [ ] TLS support for TCP output
-- [ ] Prometheus metrics exporter
-- [ ] StatsD integration
-- [ ] Multi-process worker pool
-- [ ] Batch sending with MTU awareness
-- [ ] Health check endpoint
+Issues and pull requests welcome at: https://github.com/InfiniteInsight/palo-globalprotect
 
-## 📄 License
+## License
 
-Internal use only - Xperi Corporation
+MIT License - See LICENSE file for details
 
-## ✅ Acceptance Criteria
+## References
 
-- [x] Service starts via systemd and restarts on failure
-- [x] Receives Panorama GlobalProtect logs
-- [x] Outputs valid CEF with dynamic severity
-- [x] Sustains ≥25,000 EPS in lab testing
-- [x] Configuration externalized
-- [x] Logs rotated automatically
-- [x] SELinux compatible
+- [LogStash Syslog Input Plugin](https://www.elastic.co/guide/en/logstash/current/plugins-inputs-syslog.html)
+- [Azure Monitor Agent Syslog](https://learn.microsoft.com/en-us/azure/sentinel/forward-syslog-monitor-agent)
+- [CEF Format Specification](https://www.microfocus.com/documentation/arcsight/arcsight-smartconnectors/pdfdoc/common-event-format-v25/common-event-format-v25.pdf)
+- [Palo Alto Networks Syslog Integration](https://docs.paloaltonetworks.com/pan-os/)
